@@ -11,10 +11,13 @@ import { mergeGeometries } from '../lib/BufferGeometryUtils.js';
 import { VOX } from './vox.js';
 import { AUDIO } from './audio.js?v=20260718-5';
 import { buildSuzukaMap } from './suzuka-map.js?v=20260717-15';
-import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
+import { CAR2_CPU_ROUTE, CAR2_MOUNTAIN_ROUTE } from './car2-route.js?v=20260720-2';
 
 (function () {
   'use strict';
+
+  // スマホ判定: スマホは PC PLAY ONLY(デモ観賞のみ)。
+  const IS_MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 
   // マップ選択: デフォルトは自動生成の街 + 森 + 峠。
   //   ?map=nihonbashi.gltf … 日本橋マップを読む
@@ -30,6 +33,11 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     : mapParam;
   const NIHONBASHI_MODE = MAP_GLTF.toLowerCase().endsWith('nihonbashi.gltf');
   const CAR2_MODE = decodeURIComponent(MAP_GLTF).toLowerCase().endsWith('map.gltf');
+  // map2.gltf: 山岳ラリーコース。map.gltf(車2/首都高)と同じ「北端南端で周回」
+  // 仕組みを流用する。道路網は単一の湾曲した1本道で、手描きの経路情報の代わりに
+  // CAR2_MOUNTAIN_ROUTE(実測で自動生成した道路中心線)を使い、自動運転・CPU車の
+  // 走行ラインとする。プレイヤーの当たり判定自体は汎用の地形追従(坂・壁判定)。
+  const CAR2_MOUNTAIN_MODE = decodeURIComponent(MAP_GLTF).toLowerCase().endsWith('map2.gltf');
   let mapRoot = null;              // set when a custom map is loaded (ground raycasts)
   let car2RoadMeshes = [];         // 高さ0の濃いグレー路面だけを保持
   let car2DrivableMeshes = [];     // 路面+白線(走行可能とみなす面)
@@ -142,7 +150,7 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     const k = e.key;
     // car2のデモ画面: 何かのボタンでタイトルへ戻る
     if (demoActive && CAR2_MODE) {
-      exitCar2Demo();
+      if (!IS_MOBILE) exitCar2Demo();   // スマホはデモを見せるだけ
       e.preventDefault();
       return;
     }
@@ -165,17 +173,6 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
       return;
     }
     if (pauseMode) return;               // 一時停止中は運転キーを受け付けない
-    if (!e.repeat && k.toLowerCase() === 't') {
-      topView = !topView;
-      topViewFrame = null;
-      // 真上からだと地表はフォグ(130〜480m)の外で全て空色になるため、地図表示中は
-      // フォグを外し、戻すときに復元する。
-      if (topView) { savedFog = scene.fog; scene.fog = null; }
-      else { scene.fog = savedFog; }
-      document.body.classList.toggle('top-view', topView);
-      e.preventDefault();
-      return;
-    }
     if (demoActive) { startGame(); return; }   // 何かキーでゲーム開始
     if (k.startsWith('Arrow') || k === ' ') e.preventDefault();
     if (!e.repeat) {
@@ -196,7 +193,7 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
         const frame = document.getElementById('mirror-frame');
         if (frame) frame.style.display = mirrorView ? 'block' : 'none';
       }
-      if (k.toLowerCase() === 'y' && CAR2_MODE) {
+      if (k.toLowerCase() === 'y' && (CAR2_MODE || CAR2_MOUNTAIN_MODE)) {
         autoDrive = !autoDrive;
         autoIdx = -1;                // 次フレームで最寄り地点から追従を開始
         document.body.dataset.autoDrive = String(autoDrive);
@@ -1237,9 +1234,12 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
   // ------------------------------------------------------- tyre effects ---
   const SKID_MAX = 460;
   const SMOKE_MAX = 150;   // CPU車のドリフトスモークとプールを共用する
+  const DUST_MAX = 150;    // 山岳ラリー専用の土埃(茶色)
   const skidPool = [];
   const smokePool = [];
+  const dustPool = [];
   let skidIdx = 0, smokeIdx = 0, smokeTimer = 0;
+  let dustIdx = 0, dustTimer = 0;
   const lastSkid = { x: 1e9, z: 1e9 };
 
   function makeSmokeTexture() {
@@ -1249,6 +1249,19 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     const g = ctx.createRadialGradient(32, 32, 4, 32, 32, 30);
     g.addColorStop(0, 'rgba(235,235,230,0.85)');
     g.addColorStop(1, 'rgba(235,235,230,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(cv);
+  }
+
+  // 山岳ラリー用の土埃テクスチャ(茶色)。タイヤスモークと同じ形状だが色だけ変える。
+  function makeDustTexture() {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 64;
+    const ctx = cv.getContext('2d');
+    const g = ctx.createRadialGradient(32, 32, 4, 32, 32, 30);
+    g.addColorStop(0, 'rgba(150,112,72,0.8)');
+    g.addColorStop(1, 'rgba(150,112,72,0)');
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, 64, 64);
     return new THREE.CanvasTexture(cv);
@@ -1271,6 +1284,16 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
       s.userData = { life: 0, max: 1, vx: 0, vy: 0, vz: 0 };
       scene.add(s);
       smokePool.push(s);
+    }
+    if (CAR2_MOUNTAIN_MODE) {
+      const dustTex = makeDustTexture();
+      for (let i = 0; i < DUST_MAX; i++) {
+        const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: dustTex, transparent: true, opacity: 0, depthWrite: false }));
+        s.visible = false;
+        s.userData = { life: 0, max: 1, vx: 0, vy: 0, vz: 0 };
+        scene.add(s);
+        dustPool.push(s);
+      }
     }
   }
 
@@ -1308,6 +1331,29 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     }
   }
 
+  // 山岳ラリー専用の土埃: 舗装路(FF4863A5)の上では控えめに、それ以外の地面では
+  // 頻繁に噴き上げることで「道路上は少し・それ以外はたくさん」を表現する。
+  function emitMountainDust(fx, fz, sx, sz, dt) {
+    if (!dustPool.length) return;
+    const rx = player.pos.x - fx * 1.5;
+    const rz = player.pos.z - fz * 1.5;
+    const onRoad = mountainSurfaceIsRoad(player.pos.x, player.pos.z);
+    dustTimer += dt;
+    const interval = onRoad ? 0.16 : 0.03;   // 数値が大きいほど噴出は間引かれる=少ない
+    while (dustTimer > interval) {
+      dustTimer -= interval;
+      const s = dustPool[dustIdx];
+      dustIdx = (dustIdx + 1) % DUST_MAX;
+      const side = Math.random() < 0.5 ? -0.75 : 0.75;
+      s.position.set(rx + sx * side + (Math.random() - 0.5) * 0.4, player.pos.y + 0.2, rz + sz * side + (Math.random() - 0.5) * 0.4);
+      s.scale.setScalar(0.7);
+      const d = s.userData;
+      d.life = 0; d.max = 0.9 + Math.random() * 0.5;
+      d.vx = (Math.random() - 0.5) * 1.0; d.vy = 0.6 + Math.random() * 0.6; d.vz = (Math.random() - 0.5) * 1.0;
+      s.visible = true;
+    }
+  }
+
   function updateFx(dt) {
     for (const m of skidPool) {
       if (!m.visible) continue;
@@ -1324,6 +1370,17 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
       s.position.z += d.vz * dt;
       s.scale.addScalar(dt * 1.7);
       s.material.opacity = 0.4 * (1 - d.life / d.max);
+    }
+    for (const s of dustPool) {
+      if (!s.visible) continue;
+      const d = s.userData;
+      d.life += dt;
+      if (d.life >= d.max) { s.visible = false; continue; }
+      s.position.x += d.vx * dt;
+      s.position.y += d.vy * dt;
+      s.position.z += d.vz * dt;
+      s.scale.addScalar(dt * 1.6);
+      s.material.opacity = 0.5 * (1 - d.life / d.max);
     }
   }
 
@@ -1376,7 +1433,10 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     cam.dragging = false;
     cam.lastDrag = performance.now();
     // car2デモ: ほぼ動かさずに離した(タップ)ならタイトルへ戻る
-    if (demoActive && CAR2_MODE && demoTapMove < 12) exitCar2Demo();
+    if (demoActive && CAR2_MODE && demoTapMove < 12) {
+      if (IS_MOBILE) bonnetView = (bonnetView + 1) % 3;   // スマホ: タップで視点切替
+      else exitCar2Demo();
+    }
     demoTapMove = 1e9;
   });
   window.addEventListener('pointermove', (e) => {
@@ -1412,6 +1472,19 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     groundCaster.far = rayOrigin.y + 100;   // reach the ground from any height
     const hit = groundCaster.intersectObject(mapRoot, true)[0];
     return hit ? hit.point.y : 0;
+  }
+
+  // 山岳ラリー: 足元が舗装路(材質FF4863A5、高さ0)かどうかを判定する。
+  // 土埃の量を「道路上は少し・それ以外はたくさん」に変えるために使う。
+  function mountainSurfaceIsRoad(x, z) {
+    if (!mapRoot) return true;
+    rayOrigin.set(x, player.pos.y + 3, z);
+    groundCaster.set(rayOrigin, DOWN);
+    groundCaster.far = 20;
+    const hit = groundCaster.intersectObject(mapRoot, true)[0];
+    if (!hit || !hit.object.material) return true;
+    const mat = Array.isArray(hit.object.material) ? hit.object.material[0] : hit.object.material;
+    return mat.name === 'FF4863A5';
   }
 
   // 垂直の構築物(建物・壁)との当たり判定: 車体の高さから進行方向へ短い
@@ -1501,6 +1574,26 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     player.pos.x = car2LastRoadPos.x;
     player.pos.z = car2LastRoadPos.z;
     player.vel.multiplyScalar(-0.12);
+  }
+
+  // map2(山岳ラリー)の南北ループ。手描きの道路中心線が無いため、地図読み込み後に
+  // 実測した「南北端で地形が平坦に開けている」範囲を使い、car2と同じ考え方
+  // (中心からの横オフセットを保ったまま反対端へ送る)で周回させる。
+  // 専用の路面判定(isCar2RoadAt)は使わず、汎用の地形追従・壁判定に任せる。
+  let MOUNTAIN_ROAD_CENTER_X = 0;
+  let MOUNTAIN_LOOP_EDGE_Z = 0;      // これを超えて外向きに進んだら反対端へ
+  let mountainLoopCount = 0;
+  function keepMountainOnRoad() {
+    if (!CAR2_MOUNTAIN_MODE || !MOUNTAIN_LOOP_EDGE_Z) return;
+    const outwardNorth = player.pos.z < -MOUNTAIN_LOOP_EDGE_Z && player.vel.z < 0;
+    const outwardSouth = player.pos.z > MOUNTAIN_LOOP_EDGE_Z && player.vel.z > 0;
+    if (!outwardNorth && !outwardSouth) return;
+    const laneOffset = clamp(player.pos.x - MOUNTAIN_ROAD_CENTER_X, -10, 10);
+    player.pos.x = MOUNTAIN_ROAD_CENTER_X + laneOffset;
+    player.pos.z = outwardNorth ? MOUNTAIN_LOOP_EDGE_Z - 1 : -(MOUNTAIN_LOOP_EDGE_Z - 1);
+    player.pos.y = groundHeightAt(player.pos.x, 50, player.pos.z);
+    mountainLoopCount++;
+    document.body.dataset.mountainLoopCount = String(mountainLoopCount);
   }
 
   // 街灯: 道路の両側・壁の向こう側に、車7台分(約34m)間隔で設置する。
@@ -1655,6 +1748,34 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
         x: point.x + (dz / length) * 2.4,
         z: point.z - (dx / length) * 2.4,
       };
+    });
+  }
+
+  // car2(首都高速)・山岳地帯共通: wps に沿ってドリフト旋回するCPU車を等間隔で
+  // 配置する(car2Loop:true、100〜150km/hのランダム速度)。山岳地帯は片側1車線の
+  // 単路なので buildCar2CpuRoute の右寄せは行わず、中心線をそのまま使う。
+  function spawnCar2LoopCpuCars(wps, vehicles) {
+    if (wps.length < 2) return;
+    vehicles.forEach((vehicle, i) => {
+      const start = Math.min(wps.length - 2, Math.floor(i * (wps.length - 1) / Math.max(1, vehicles.length)));
+      const next = start + 1;
+      const a = wps[start], b = wps[next];
+      const speedKmh = 100 + Math.random() * 50;
+      const base = speedKmh / 3.6;
+      const bike = isKabuVoxUrl(vehicle.url);
+      const g = makeCarGroup(vehicle.mesh.clone(), false, bike);
+      aiCars.push({
+        group: g.group, tilt: g.tilt,
+        pos: new THREE.Vector3(a.x, groundHeightAt(a.x, 6, a.z), a.z),
+        heading: Math.atan2(b.x - a.x, b.z - a.z),
+        v: base, base,
+        wps, idx: next, radius: carRadiusFor(bike), kabu: bike,
+        cornerSlowdown: 0.55,
+        turnRate: 3.4,
+        car2Loop: true,
+        roadCheckIn: Math.random() * 0.25,
+        speedKmh,
+      });
     });
   }
 
@@ -1917,6 +2038,82 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     });
   }
 
+  // map2(山岳ラリー): 道路網の情報が無いので、緑色の地面(材質名 FF00994C)の
+  // メッシュそのものから三角形を直接サンプリングしてtree01を密集配置する。
+  // (地図全体へレイキャストする方式は候補点ごとにmapRoot全体と交差判定するため
+  //  重く、読み込みが固まってしまった。実際の緑メッシュは76面程度しか無いので、
+  //  面積に応じて重心座標でランダム抽出したほうが軽くて確実)
+  function scatterMountainTrees(treeMesh, rnd) {
+    if (!mapRoot) return;
+    let greenMesh = null;
+    mapRoot.traverse((o) => {
+      if (o.isMesh) {
+        const mat = Array.isArray(o.material) ? o.material[0] : o.material;
+        if (mat && mat.name === 'FF00994C') greenMesh = o;
+      }
+    });
+    if (!greenMesh) return;
+    greenMesh.updateWorldMatrix(true, false);
+    const geom = greenMesh.geometry;
+    const pos = geom.attributes.position;
+    const idx = geom.index;
+    const triCount = idx ? idx.count / 3 : pos.count / 3;
+    const triVertex = (t, k) => (idx ? idx.getX(t * 3 + k) : t * 3 + k);
+    const tris = [];
+    let totalArea = 0;
+    const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
+    for (let t = 0; t < triCount; t++) {
+      vA.fromBufferAttribute(pos, triVertex(t, 0)).applyMatrix4(greenMesh.matrixWorld);
+      vB.fromBufferAttribute(pos, triVertex(t, 1)).applyMatrix4(greenMesh.matrixWorld);
+      vC.fromBufferAttribute(pos, triVertex(t, 2)).applyMatrix4(greenMesh.matrixWorld);
+      const area = new THREE.Triangle(vA, vB, vC).getArea();
+      tris.push({ a: vA.clone(), b: vB.clone(), c: vC.clone(), area });
+      totalArea += area;
+    }
+    const TARGET = 600;
+    const density = totalArea > 0 ? TARGET / totalArea : 0;
+    const SECTORS = 10;
+    const sectorLists = Array.from({ length: SECTORS }, () => []);
+    const placedPoints = [];
+    const MIN_SPACING = 3;
+    for (const tri of tris) {
+      const count = Math.round(tri.area * density * 1.6);   // 間引きされる分を見込んで多めに生成
+      for (let i = 0; i < count; i++) {
+        let r1 = rnd(), r2 = rnd();
+        if (r1 + r2 > 1) { r1 = 1 - r1; r2 = 1 - r2; }
+        const x = tri.a.x + (tri.b.x - tri.a.x) * r1 + (tri.c.x - tri.a.x) * r2;
+        const y = tri.a.y + (tri.b.y - tri.a.y) * r1 + (tri.c.y - tri.a.y) * r2;
+        const z = tri.a.z + (tri.b.z - tri.a.z) * r1 + (tri.c.z - tri.a.z) * r2;
+        let tooClose = false;
+        for (const q of placedPoints) {
+          const dx = q.x - x, dz = q.z - z;
+          if (dx * dx + dz * dz < MIN_SPACING * MIN_SPACING) { tooClose = true; break; }
+        }
+        if (tooClose) continue;
+        const s = 0.8 + rnd() * 0.7;
+        let sector = Math.floor(((z + BOUND_Z) / (BOUND_Z * 2)) * SECTORS);
+        sector = Math.max(0, Math.min(SECTORS - 1, sector));
+        sectorLists[sector].push({ x, y, z, s, rot: rnd() * Math.PI * 2 });
+        placedPoints.push({ x, z });
+      }
+    }
+    const m4 = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    for (const list of sectorLists) {
+      if (!list.length) continue;
+      const inst = new THREE.InstancedMesh(treeMesh.geometry, treeMesh.material, list.length);
+      list.forEach((p, i) => {
+        q.setFromAxisAngle(up, p.rot);
+        m4.compose(new THREE.Vector3(p.x, p.y, p.z), q, new THREE.Vector3(p.s, p.s, p.s));
+        inst.setMatrixAt(i, m4);
+      });
+      inst.computeBoundingSphere();
+      inst.frustumCulled = true;
+      scene.add(inst);
+    }
+  }
+
   // Waypoints for a rectangular circuit over the grid, shifted into the
   // left lane of each leg (left-hand traffic).
   function rectLoop(xa, xb, za, zb, cw) {
@@ -1984,7 +2181,10 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     wrap.add(map);
     const pScale = parseFloat(qs.get('scale'));
     // mm 単位の地図は実寸(1/1000)だと街路が車に対して窮屈なので10倍で読む
-    const scale = pScale || (CAR2_MODE ? 0.000075 : (Math.max(size.x, size.y, size.z) > 4000 ? 0.01 : 1));
+    // map2(山岳ラリー)は生データの長辺が約8100単位なので0.2倍を基準にしていたが、
+    // ユーザー指示で75%(0.15)に縮小(全長約1200m程度)。
+    const scale = pScale || (CAR2_MODE ? 0.000075 : CAR2_MOUNTAIN_MODE ? 0.15
+      : (Math.max(size.x, size.y, size.z) > 4000 ? 0.01 : 1));
     wrap.scale.setScalar(scale);
     const zupParam = qs.get('zup');
     const zup = CAR2_MODE ? false : (zupParam !== null ? zupParam === '1' : size.z < size.y * 0.5);
@@ -2060,6 +2260,20 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
       // 見えるため、car2 はフォグを遠ざけて手前の色をクリアにする。
       // far はカメラ描画限界(1200m)の手前に置き、遠景の切れ目は空色へ溶かす。
       scene.fog = new THREE.Fog(SKY, 500, 1150);
+    } else if (CAR2_MOUNTAIN_MODE) {
+      // map2(山岳ラリー): 手描きの経路情報が無いので、街灯・専用路面判定は
+      // 使わない。地図の前後コピーで次の周回を見せる演出と、car2と同じ
+      // 空(フォグを遠くへ)だけを流用する。
+      const mtBox = new THREE.Box3().setFromObject(wrap);
+      const mtLoopSpan = mtBox.max.z - mtBox.min.z;
+      for (const direction of [-1, 1]) {
+        const visualCopy = wrap.clone(true);
+        visualCopy.position.z += mtLoopSpan * direction;
+        visualCopy.traverse((o) => { if (o.isMesh) o.castShadow = false; });
+        scene.add(visualCopy);
+        car2VisualWraps.push(visualCopy);
+      }
+      scene.fog = new THREE.Fog(SKY, 500, 1150);
     }
 
     const out = { spawn: null, loops: {} };
@@ -2092,15 +2306,18 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
       VOX.load('vox/object/tree01.vox', { scale: TREE_SCALE }),
       VOX.load('vox/object/tree02.vox', { scale: TREE_SCALE }),
     ]);
-    // 日本橋ではCPU車を配置しないため、車種検索とVOX読み込みも省略する。
-    const discoveredCpuVox = NIHONBASHI_MODE ? [] : await discoverCpuCarVox();
-    // 鈴鹿は車種ごと最大2台の多様な10台(Kabuは1台)を選ぶ。
+    // 日本橋(手描き経路が無いためCPU車を安全に走らせられない)ではCPU車を
+    // 配置しないため、車種検索とVOX読み込みも省略する。
+    const SKIP_CPU_CARS = NIHONBASHI_MODE;
+    const discoveredCpuVox = SKIP_CPU_CARS ? [] : await discoverCpuCarVox();
+    // 鈴鹿・首都高速・山岳地帯は車種ごと最大2台の多様な10台(Kabuは1台)を選ぶ。
     // sort 済み先頭9台だと keitora/nissan の色違いばかりになってしまうため。
-    const suzukaCpuVox = SUZUKA_MODE ? pickDiverseCpuVox(discoveredCpuVox, 2, 10, 1) : [];
+    const diverseCpuVox = (SUZUKA_MODE || CAR2_MODE || CAR2_MOUNTAIN_MODE)
+      ? pickDiverseCpuVox(discoveredCpuVox, 2, 10, 1) : [];
     const cpuCars = await loadCpuCars(
-      NIHONBASHI_MODE ? [] : (SUZUKA_MODE
-        ? suzukaCpuVox
-        : (CAR2_MODE ? discoveredCpuVox : (MAP_GLTF ? discoveredCpuVox.slice(0, 4) : discoveredCpuVox)))
+      SKIP_CPU_CARS ? [] : ((SUZUKA_MODE || CAR2_MODE || CAR2_MOUNTAIN_MODE)
+        ? diverseCpuVox
+        : (MAP_GLTF ? discoveredCpuVox.slice(0, 4) : discoveredCpuVox))
     );
     const cpuMeshes = cpuCars.map((car) => car.mesh);
 
@@ -2154,29 +2371,7 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
       if (CAR2_MODE) {
         car2AutoRoute = CAR2_CPU_ROUTE.map(([x, z]) => ({ x, z }));   // 自動運転用
         const wps = buildCar2CpuRoute();
-        if (wps.length >= 2) {
-          cpuCars.forEach((vehicle, i) => {
-            const start = Math.min(wps.length - 2, Math.floor(i * (wps.length - 1) / Math.max(1, cpuCars.length)));
-            const next = start + 1;
-            const a = wps[start], b = wps[next];
-            const speedKmh = 100 + Math.random() * 50;
-            const base = speedKmh / 3.6;
-            const bike = isKabuVoxUrl(vehicle.url);
-            const g = makeCarGroup(vehicle.mesh.clone(), false, bike);
-            aiCars.push({
-              group: g.group, tilt: g.tilt,
-              pos: new THREE.Vector3(a.x, groundHeightAt(a.x, 6, a.z), a.z),
-              heading: Math.atan2(b.x - a.x, b.z - a.z),
-              v: base, base,
-              wps, idx: next, radius: carRadiusFor(bike), kabu: bike,
-              cornerSlowdown: 0.55,
-              turnRate: 3.4,
-              car2Loop: true,
-              roadCheckIn: Math.random() * 0.25,
-              speedKmh,
-            });
-          });
-        }
+        spawnCar2LoopCpuCars(wps, cpuCars);
         document.body.dataset.car2CpuRoutePoints = String(wps.length);
       } else if (SUZUKA_MODE) {
         mapRoot = info.root;
@@ -2187,6 +2382,19 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
         camera.far = 2400;
         camera.updateProjectionMatrix();
         scene.fog.far = 1800;
+      } else if (CAR2_MOUNTAIN_MODE) {
+        // 地図の外形(バウンディングボックス)は原点中心だが、道路そのものは
+        // 中心からX方向にずれた位置を通っている。スケール0.2の時に実測した
+        // 道路中心X=-305.5を、現在のスケール比(0.15/0.2=75%)で換算して使う。
+        // BOUND_Zの少し内側を「出口」にし、そこを超えて外向きに進んだら
+        // 反対端へ送る(car2と同じ考え方)。
+        MOUNTAIN_ROAD_CENTER_X = -305.5 * 0.75;
+        MOUNTAIN_LOOP_EDGE_Z = BOUND_Z - 3;
+        scatterMountainTrees(tree1, mulberry32(20260719));
+        // CAR2_MOUNTAIN_ROUTE(実測で自動生成した道路中心線)を自動運転・CPU車の
+        // 走行ラインに使う。単路(片側1車線)なので car2 のような右寄せは行わない。
+        car2AutoRoute = CAR2_MOUNTAIN_ROUTE.map(([x, z]) => ({ x, z }));
+        spawnCar2LoopCpuCars(car2AutoRoute, cpuCars);
       }
       // 開始位置は「道路の上」: 中心付近を放射状にレイキャストして、
       // 一番よく出てくる高さ(=道路・地表)の中で中心に近い地点を選ぶ。
@@ -2228,6 +2436,17 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
         document.body.dataset.car2LoopReady = 'true';
         document.body.dataset.car2LoopCount = '0';
         document.body.dataset.car2SpawnOnRoad = String(isCar2RoadAt(player.pos.x, player.pos.z));
+      } else if (CAR2_MOUNTAIN_MODE) {
+        player.pos.set(MOUNTAIN_ROAD_CENTER_X, 0, MOUNTAIN_LOOP_EDGE_Z - 1);
+        player.pos.y = groundHeightAt(player.pos.x, 500, player.pos.z);
+        player.heading = Math.PI;   // 南端から北向きにコースへ入る(car2と同じ向き)
+        gameSpawn = {
+          x: player.pos.x,
+          y: player.pos.y,
+          z: player.pos.z,
+          heading: player.heading,
+        };
+        document.body.dataset.mountainLoopCount = '0';
       } else if (info.spawn) {
         const sp = info.spawn.getWorldPosition(new THREE.Vector3());
         const f = new THREE.Vector3(0, 0, 1).applyQuaternion(info.spawn.getWorldQuaternion(new THREE.Quaternion()));
@@ -2322,7 +2541,9 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
       initFx();
 
       const demoRoute = info.demoRoute || [];
-      if (CAR2_MODE) {
+      if (CAR2_MODE || CAR2_MOUNTAIN_MODE) {
+        // map2(山岳ラリー)も手描きの経路が無いため、車2と同様に読み込み直後の
+        // デモ(小さい円のドリフト周回)には入らない。
         demoActive = false;
         document.body.classList.remove('demo');
       } else if (demoRoute.length >= 2) {
@@ -2373,6 +2594,11 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
           mode: soundMode, interior: interiorCurrent,
           lowPaused: interiorLow.paused, highPaused: interiorHigh.paused,
         }),
+      };
+      window.__mapDebug = {
+        camera, scene, mapRoot, THREE, BOUND_X_MIN, BOUND_X_MAX, BOUND_Z,
+        freeze: () => { __debugFreezeCam = true; },
+        unfreeze: () => { __debugFreezeCam = false; },
       };
       document.body.dataset.aiCarCount = String(aiCars.length);
       document.body.dataset.aiSpeedAverageKmh = aiCars.length
@@ -2903,7 +3129,8 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
       // オレンジ液晶の音量メーター、青緑液晶の曲リスト。
       // ゲーム画面より小さいコンパクトな窓(縦長にしない。リストは少行数+高速スクロール)
       const panel = document.createElement('div');
-      panel.style.cssText = 'width:min(520px,76vw);max-height:60vh;display:flex;flex-direction:column;'
+      panel.style.cssText = 'width:min(520px,76vw);max-height:82vh;display:flex;flex-direction:column;'
+        + 'overflow:hidden;'
         + 'background:#0a0a0a;border:3px double #fff;border-radius:0;padding:10px 14px;color:#fff;'
         + 'font-family:"Hiragino Kaku Gothic ProN","Noto Sans JP",Meiryo,sans-serif;';
       const title = document.createElement('div');
@@ -2984,7 +3211,7 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
       // 曲リスト: 青緑液晶バックに濃いグレーの太字(液晶風の等幅ゴシック)。
       // スクロールバーは表示しない(十字キー上下の高速閲覧で移動する)。
       musicListEl.style.cssText = 'overflow-y:hidden;font-size:19px;line-height:1.55;'
-        + 'height:314px;flex:none;margin-top:4px;padding:6px 4px;border:1px solid #666;'
+        + 'height:min(314px,36vh);flex:none;margin-top:4px;padding:6px 4px;border:1px solid #666;'
         + 'font-family:"MS Gothic","ＭＳ ゴシック","Courier New",monospace;'
         + 'font-weight:900;-webkit-text-stroke:0.5px currentColor;'
         + 'background:#33CC33;';
@@ -3215,10 +3442,10 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
       const c = car2Autopilot();
       throttle = c.throttle; brake = c.brake; handbrake = c.handbrake; input = c.steer;
     } else {
-      throttle = !!keys['s'];   // S = アクセル
-      brake = !!keys['a'];      // A = ブレーキ
-      handbrake = !!keys[' '];
-      input = (keys['arrowleft'] ? 1 : 0) - (keys['arrowright'] ? 1 : 0);
+      throttle = !!keys['s'] || gamepadState.throttle;   // S / RT = アクセル
+      brake = !!keys['a'] || gamepadState.brake;         // A / LT = ブレーキ
+      handbrake = !!keys[' '] || gamepadState.handbrake; // Space / ガムパッドA = ドリフト
+      input = clamp((keys['arrowleft'] ? 1 : 0) - (keys['arrowright'] ? 1 : 0) + gamepadState.steer, -1, 1);
     }
 
     // steering (less lock at speed, extra lock while sliding for counter-steer)
@@ -3313,6 +3540,7 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     if (mapRoot) {
       collideWalls(dt);
       keepCar2OnRoad();
+      keepMountainOnRoad();
       const gy = groundHeightAt(player.pos.x, player.pos.y, player.pos.z);
       player.pos.y += (gy - player.pos.y) * Math.min(1, dt * 9);
     } else {
@@ -3338,6 +3566,7 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     // tyre effects while sliding
     if (player.drifting && Math.abs(vS) > 1.6) {
       emitTyreFx(fx, fz, sx, sz, dt);
+      if (CAR2_MOUNTAIN_MODE) emitMountainDust(fx, fz, sx, sz, dt);
     }
 
     // sound
@@ -3548,27 +3777,28 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     return group;
   }
 
-  // ボンネットカメラ用の画面下部カバー。車体のピッチ/バウンドでボンネットが
-  // 浮き、画面最下部に路面が見えてしまう隙間を車体色の帯で覆う。
-  let bonnetCoverEl = null;
+  // ボンネットカメラ時は映画のレターボックス(上下の黒帯)を表示する。
+  // 車体のピッチで画面最下部に路面が見えてしまう隙間もこの帯で隠れる。
+  let bonnetBarsEl = null;
   function updateBonnetCover() {
-    if (!bonnetCoverEl) {
-      bonnetCoverEl = document.createElement('div');
-      bonnetCoverEl.style.cssText = 'position:fixed;left:0;right:0;bottom:0;height:9vh;'
-        + 'z-index:3;pointer-events:none;display:none;';
-      document.body.appendChild(bonnetCoverEl);
+    if (!bonnetBarsEl) {
+      bonnetBarsEl = document.createElement('div');
+      bonnetBarsEl.style.cssText = 'position:fixed;inset:0;z-index:3;pointer-events:none;display:none;';
+      const barTop = document.createElement('div');
+      barTop.style.cssText = 'position:absolute;top:0;left:0;right:0;height:9vh;background:#000;';
+      const barBottom = document.createElement('div');
+      barBottom.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:9vh;background:#000;';
+      bonnetBarsEl.appendChild(barTop);
+      bonnetBarsEl.appendChild(barBottom);
+      document.body.appendChild(bonnetBarsEl);
     }
-    const show = bonnetView === 1;
-    bonnetCoverEl.style.display = show ? 'block' : 'none';
-    if (show) {
-      const isVolvo = PLAYER_CAR_KEY === 'volvo240';
-      bonnetCoverEl.style.background = nightMode
-        ? (isVolvo ? '#3c0708' : '#2b2d30')     // 夜はボンネットの暗い見え方に合わせる
-        : (isVolvo ? '#d40707' : '#ececec');    // Toyota=白 / Volvo=赤
-    }
+    bonnetBarsEl.style.display = bonnetView === 1 ? 'block' : 'none';
+    document.body.dataset.bonnetView = String(bonnetView);
   }
 
+  let __debugFreezeCam = false;   // 一時デバッグ: trueの間はupdateCameraが視点を上書きしない
   function updateCamera(dt) {
+    if (__debugFreezeCam) return;
     // 視点のみモード(V 2回目)では自車(影・ランプ含む)を一切映さない
     if (player.group) player.group.visible = bonnetView !== 2;
     updateBonnetCover();
@@ -3626,7 +3856,7 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     document.body.dataset.playerMapMarkerVisible = 'false';
     document.body.dataset.criminalMapMarkerVisible = 'false';
     camera.up.set(0, 1, 0);
-    if (demoActive) {
+    if (demoActive && bonnetView === 0) {
       // スワイプ(ドラッグ)中とその直後はユーザーのカメラ操作を優先する
       const t = performance.now();
       if (cam.dragging || t - cam.lastDrag < 2500) {
@@ -3724,32 +3954,81 @@ import { CAR2_CPU_ROUTE } from './car2-route.js?v=20260718-1';
     player.group.visible = playerVisible;
   }
 
+  // ------------------------------------------------------- gamepad (PC) ----
+  // 左stick=ハンドル / RT=アクセル / LT=ブレーキ / A=ドリフト(サイドブレーキ)
+  // Y=シフトダウン / B=シフトアップ / X=カメラ視点切替(V) / LB=自動運転(Y) / RB=夜間(N)
+  const gamepadState = { steer: 0, throttle: false, brake: false, handbrake: false };
+  const gpPrev = { y: false, b: false, x: false, lb: false, rb: false };
+  function pollGamepad() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const gp = pads && (pads[0] || pads[1] || pads[2] || pads[3]);
+    if (!gp) {
+      gamepadState.steer = 0; gamepadState.throttle = false;
+      gamepadState.brake = false; gamepadState.handbrake = false;
+      return;
+    }
+    AUDIO.unlock();
+    const deadzone = (v) => (Math.abs(v) < 0.12 ? 0 : v);
+    gamepadState.steer = -deadzone(gp.axes[0] || 0);       // 左に倒す=ArrowLeftと同じ+側
+    const rt = gp.buttons[7] ? gp.buttons[7].value : 0;
+    const lt = gp.buttons[6] ? gp.buttons[6].value : 0;
+    gamepadState.throttle = rt > 0.12;
+    gamepadState.brake = lt > 0.12;
+    gamepadState.handbrake = !!(gp.buttons[0] && gp.buttons[0].pressed);   // A
+
+    const yBtn = !!(gp.buttons[3] && gp.buttons[3].pressed);   // Y
+    const bBtn = !!(gp.buttons[1] && gp.buttons[1].pressed);   // B
+    const xBtn = !!(gp.buttons[2] && gp.buttons[2].pressed);   // X
+    const lbBtn = !!(gp.buttons[4] && gp.buttons[4].pressed);  // LB
+    const rbBtn = !!(gp.buttons[5] && gp.buttons[5].pressed);  // RB
+    // メニュー表示中・一時停止中・car2デモ中はキーボードと同様にボタン操作を無効化
+    if (!musicMode && !pauseMode && !(demoActive && CAR2_MODE)) {
+      if (yBtn && !gpPrev.y) shiftDown = true;
+      if (bBtn && !gpPrev.b) shiftUp = true;
+      if (xBtn && !gpPrev.x) bonnetView = (bonnetView + 1) % 3;
+      if (lbBtn && !gpPrev.lb && (CAR2_MODE || CAR2_MOUNTAIN_MODE)) {
+        autoDrive = !autoDrive;
+        autoIdx = -1;
+        document.body.dataset.autoDrive = String(autoDrive);
+      }
+      if (rbBtn && !gpPrev.rb) { nightMode = !nightMode; applyNight(); }
+    }
+    gpPrev.y = yBtn; gpPrev.b = bBtn; gpPrev.x = xBtn; gpPrev.lb = lbBtn; gpPrev.rb = rbBtn;
+  }
+
   // --------------------------------------------------------------- loop ---
   let last = performance.now();
   function tick(now) {
-    const dt = Math.min((now - last) / 1000, 0.05);
-    last = now;
-    const sigStates = updateSignals(now / 1000);
-    // car2デモ: 10秒ごとに昼夜をチェンジ
-    if (demoActive && CAR2_MODE && now >= demoDayNightAt) {
-      nightMode = !nightMode;
-      applyNight();
-      demoDayNightAt = now + 10000;
+    try {
+      const dt = Math.min((now - last) / 1000, 0.05);
+      last = now;
+      pollGamepad();
+      const sigStates = updateSignals(now / 1000);
+      // car2デモ: 10秒ごとに昼夜をチェンジ
+      if (demoActive && CAR2_MODE && now >= demoDayNightAt) {
+        nightMode = !nightMode;
+        applyNight();
+        demoDayNightAt = now + 10000;
+      }
+      if (musicMode || pauseMode) {
+        // 音楽選択・一時停止中は運転(シミュレーション)を停止。音はアイドルへ。
+        AUDIO.update(dt, { gear: 1, rpm: 0, throttle: false, slip: 0, drifting: false, brakeSkid: false, speed: 0 });
+      } else {
+        updatePlayer(dt);
+        updateAI(dt, sigStates);
+        updateMission();
+      }
+      updateFx(dt);
+      updateTailTrails(dt);
+      updateCamera(dt);
+      updateClouds(dt);
+      renderer.render(scene, camera);
+      renderMirror();
+    } catch (err) {
+      // 1フレームの例外でrequestAnimationFrameの連鎖が止まって完全フリーズする
+      // 事態を避けるため、ログに残しつつ次フレームへ継続する。
+      console.error(err);
     }
-    if (musicMode || pauseMode) {
-      // 音楽選択・一時停止中は運転(シミュレーション)を停止。音はアイドルへ。
-      AUDIO.update(dt, { gear: 1, rpm: 0, throttle: false, slip: 0, drifting: false, brakeSkid: false, speed: 0 });
-    } else {
-      updatePlayer(dt);
-      updateAI(dt, sigStates);
-      updateMission();
-    }
-    updateFx(dt);
-    updateTailTrails(dt);
-    updateCamera(dt);
-    updateClouds(dt);
-    renderer.render(scene, camera);
-    renderMirror();
     requestAnimationFrame(tick);
   }
 
