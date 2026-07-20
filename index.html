@@ -445,12 +445,6 @@
     const isMobileUA = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
     if (isMobileUA) document.body.classList.add('is-mobile');
 
-    // --- タイトルBGM ---
-    const titleAudio = new Audio('sound/car2026.m4a');
-    titleAudio.loop = false; // PC/スマホともにループさせない
-    titleAudio.volume = 0.8;
-    setTimeout(() => titleAudio.play().catch(() => {}), 3000); // タイトル表示完了3秒後に再生
-
     const titleEl = document.getElementById('title-t');
     const currentMap = query.get('map') || 'map.gltf';
     const selectedCar = query.get('car') || 'toyota86';
@@ -478,35 +472,36 @@
 
     let titleShown = true;
     let gameStarted = false;
-    const enterDemo = () => {
-      if (!gameStarted && titleShown && window.__car2Demo && window.__car2Demo.enter()) {
-        titleShown = false;
-        titleEl.style.display = 'none';
-      }
+    let idleTimer = 0;
+    const armIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        if (!gameStarted && titleShown && window.__car2Demo && window.__car2Demo.enter()) {
+          titleShown = false;
+          titleEl.style.display = 'none';
+        } else if (!gameStarted) {
+          armIdleTimer();
+        }
+      }, 5000);
     };
-    // PC/スマホ共通: 音楽を1度だけ再生し、終了0.5秒後にデモへ
-    titleAudio.addEventListener('ended', () => {
-      if (!gameStarted && titleShown) setTimeout(enterDemo, 500);
-    });
+    armIdleTimer();
     window.__titleT = {
       show() {
         if (gameStarted) return;
         titleShown = true;
         titleEl.style.display = 'flex';
-        titleAudio.currentTime = 0; // 再表示時は最初から再生し直す
-        setTimeout(() => titleAudio.play().catch(() => {}), 3000); // タイトル表示完了3秒後に再生
+        armIdleTimer();
       },
     };
     const beginGame = () => {
-      titleAudio.pause(); // ゲーム開始時に停止
       gameStarted = true;
       titleShown = false;
+      clearTimeout(idleTimer);
       titleEl.remove();
       window.removeEventListener('keydown', startFromTitle, true);
       window.removeEventListener('pointerdown', startFromTitle, true);
     };
     const startFromTitle = (e) => {
-      titleAudio.play().catch(() => {}); // 操作開始時に再生
       if (isMobileUA) return;
       if (guideOpen) {
         guideOpen = false;
